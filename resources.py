@@ -5,21 +5,26 @@ import os
 import sys
 import getopt
 import csv
+import plistlib
 
 params = ["resources-folder=", "configuration=", "string-csv=", "checkImageUsage", "checkStringUsage",
-          "stringsFileName=", "stringsFilePath=", "replaceRecursive"]
+          "stringsFileName=", "stringsFilePath=", "replaceRecursive", "verbose", "infoPlistFile=", "doNotWriteStringDefinitions"]
 configuration = None
 criticalError = False
 files = set([])
 imgConstants = []
 stringConstants = []
-path = None
+paths = None
 stringCsv = None
 checkImageUsage = False
 checkStringUsage = False
 stringsFilePath = ""
 stringsFileName = "Localizable"
 replaceRecursive = False
+verbose = False
+infoPlistFilePath = None
+infoPlistFile = None
+doNotWriteStringDefinitions = False
 
 
 def usage():
@@ -40,7 +45,7 @@ except getopt.GetoptError, err:
 
 for o, a in opts:
     if o in ("-r", "--resources-folder"):
-        path = a
+        paths = a.split(",")
     elif o in ("-s", "--string-csv"):
         stringCsv = a
     elif o in ("-c", '--configuration'):
@@ -55,17 +60,23 @@ for o, a in opts:
         stringsFilePath = a
     elif o in "--replaceRecursive":
         replaceRecursive = True
+    elif o in ("--verbose", "-v"):
+        verbose = True
+    elif o in "--infoPlistFile":
+        infoPlistFilePath = a
+    elif o in "--doNotWriteStringDefinitions":
+        doNotWriteStringDefinitions = True
     else:
         assert False, "unhandled option" + o + a
 
-if path is None:
+if paths is None:
     print "the resource path was not defined"
     usage()
     sys.exit(1)
 
 baseFolder = os.path.join(os.getcwd(), os.path.split(sys.argv[0])[0])
 os.chdir(baseFolder)
-resourceConstantsHeaderFile = os.path.join(path, "ResourcesConstants.h")
+resourceConstantsHeaderFile = os.path.join(paths[0], "ResourcesConstants.h")
 
 constantsString = "//this file contains the names of all resouces as constants\n\n"
 
@@ -80,8 +91,8 @@ def scanDirs(path):
                 print "fools added a Photoshop file: " + currentFile
                 criticalError = True
 
-
-scanDirs(path)
+for path in paths:
+    scanDirs(path)
 
 oldFileHash = ""
 oldGitHash = ""
@@ -133,6 +144,7 @@ def replaceRecursiveAll(a, b):
     os.popen(sed)
 
 
+
 if stringCsv is not None:
     # need to handle multiple files
     localFile = open(os.path.join(stringsFilePath, "{0}.strings".format(stringsFileName)), 'w')
@@ -146,8 +158,9 @@ if stringCsv is not None:
             constantName = cleanName
             comment = row[len(row) - 1]
             german = row[1]
-            constantsString += "#define {0} NSLocalizedStringFromTable(@\"{2}\",@\"{1}\",@\"{3}\")\n".format(
-                constantName, stringsFileName, cleanName, comment)
+            if not doNotWriteStringDefinitions:
+                constantsString += "#define {0} NSLocalizedStringFromTable(@\"{2}\",@\"{1}\",@\"{3}\")\n".format(
+                    constantName, stringsFileName, cleanName, comment)
             stringConstants.append(constantName)
             localFile.write("\"{0}\" = \"{1}\";\n".format(cleanName, german))
 
@@ -157,13 +170,24 @@ if stringCsv is not None:
 
 fileExceptions = ["Default-568h@2x.png"]
 
+if infoPlistFilePath is not None:
+    infoPlistFile = plistlib.readPlist(infoPlistFilePath)
+    infoPlistFile["UIAppFonts"] = []
+
+def addFontToPlist(fileName):
+    if infoPlistFile is not None:
+        infoPlistFile["UIAppFonts"].append(fileName)
+
+
 for fileName in sorted(files):
 
 #	fileName = os.path.basename(filepath)
 
-    isImage = ".png" in fileName
-    fileNameNoEnding = fileName.split(".")[0].replace("-", "_").replace("~", "_")
-    constantName = fileNameNoEnding.upper();
+    isImage = fileName.endswith(".png") or fileName.endswith( ".jpg")
+
+    fileNameNoEnding = fileName.split(".")[0]
+    fileNameNoEnding_sanitized = fileNameNoEnding.replace("-", "_").replace("~", "_")
+    constantName = fileNameNoEnding_sanitized.upper()
 
     for forbiddenChar in [":"]:
         if forbiddenChar.lower() in fileName.lower():
@@ -171,6 +195,9 @@ for fileName in sorted(files):
             print fileName + " contains a fobidden character " + forbiddenChar
 
     if isImage:
+        if "568h" in fileName:
+            print "ignoring {0} because ist a long phone file".format(fileName)
+            continue
         if not "@2x" in fileName:
             name2x = fileName.replace(".png", "@2x.png");
             if not name2x in files:
@@ -182,19 +209,26 @@ for fileName in sorted(files):
             imgConstants.append([constantName, fileName])
             if replaceRecursive:
                 replaceRecursiveAll("@\"{0}\"".format(fileName), constantName)
-                replaceRecursiveAll("@\"{0}\"".format(os.path.splitext(fileName)[0]), constantName)
+                replaceRecursiveAll("@\"{0}\"".format(fileNameNoEnding), constantName)
         else:
             normalName = fileName.replace("@2x.png", ".png");
             # ADDED exception on iPhone5 splashscreen
             if not normalName in files and fileName not in fileExceptions:
-                print "missing normal file for:" + fileName
+                print "missing normal file for: {0}".format(fileName)
                 criticalError = True
-    elif ".otf" in fileName:
-        constantsString += "#define FONT_" + constantName + " @\"" + fileName + "\" \n"
-    elif ".ttf" in fileName:
-        constantsString += "#define FONT_" + constantName + " @\"" + fileName + "\" \n"
+    elif ".otf" in fileName or ".ttf" in fileName:
+        constantsString += "#define FONT_{0} @\"{1}\" \n".format(constantName, fileNameNoEnding)
+        if infoPlistFile is not None:
+            addFontToPlist(fileName);
     elif ".plist" in fileName:
-        constantsString += "#define PLIST_" + constantName + " @\"" + fileName + "\" \n"
+        constantsString += "#define PLIST_{0} @\"{1}\" \n".format(constantName, fileName)
+
+if infoPlistFile is not None:
+    if len(infoPlistFile["UIAppFonts"]) > 0:
+        print "writing the modified plist"
+        plistlib.writePlist(infoPlistFile, infoPlistFilePath)
+    else:
+        print "not writing the modified plist because no fonts were found"
 
 if fileSetChanged or gitRevisionChanged or stringsProvided:
     print "writing " + resourceConstantsHeaderFile
@@ -218,11 +252,21 @@ imageOccuranceExceptions = ["Default~ipad.png", "Default~iphone.png", "Icon-72.p
 
 unusedImages = []
 
+
+def logVerbose(param):
+    if verbose:
+        print(param)
+
+
 if checkImageUsage:
     os.chdir("../../")
     for imgSet in imgConstants:
+
         imgConstant = imgSet[0]
         imgName = imgSet[1]
+
+        logVerbose("checking useage of {0} and {1}".format(imgConstant, imgName))
+
         if imgName in imageOccuranceExceptions:
             continue
         numOfOccurences = len(
